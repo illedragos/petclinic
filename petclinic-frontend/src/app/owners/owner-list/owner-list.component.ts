@@ -11,9 +11,8 @@ import { finalize } from 'rxjs/operators';
 })
 export class OwnerListComponent implements OnInit {
   errorMessage: string;
-  lastName: string;
+  filterTerm: string = '';
   owners: Owner[];
-  listOfOwnersWithLastName: Owner[];
   isOwnersDataReceived: boolean = false;
 
   constructor(private router: Router, private ownerService: OwnerService) {
@@ -30,42 +29,43 @@ export class OwnerListComponent implements OnInit {
       error => this.errorMessage = error as any);
   }
 
+  /**
+   * Owners filtered client-side over all visible columns. The term is split into
+   * whitespace-separated tokens; a row matches when every token is a
+   * case-insensitive substring of that row's combined visible text. An empty (or
+   * whitespace-only) term matches every owner.
+   */
+  get filteredOwners(): Owner[] {
+    const owners = this.owners ?? [];
+    const tokens = (this.filterTerm ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) {
+      return owners;
+    }
+    return owners.filter(owner => {
+      const text = this.ownerVisibleText(owner);
+      return tokens.every(token => text.includes(token));
+    });
+  }
+
+  /** The visible textual content of an owner's row, joined and lowercased. */
+  private ownerVisibleText(owner: Owner): string {
+    const petNames = (owner.pets ?? []).map(pet => pet.name ?? '');
+    return [
+      owner.firstName,
+      owner.lastName,
+      owner.address,
+      owner.city,
+      owner.telephone,
+      ...petNames,
+    ].join(' ').toLowerCase();
+  }
+
   onSelect(owner: Owner) {
     this.router.navigate(['/owners', owner.id]);
   }
 
   addOwner() {
     this.router.navigate(['/owners/add']);
-  }
-
-  searchByLastName(lastName: string)
-  {
-      console.log('inside search by last name starting with ' + (lastName));
-      if (lastName === '')
-      {
-      this.ownerService.getOwners()
-      .subscribe(
-            (owners) => {
-             this.owners = owners;
-            });
-      }
-      if (lastName !== '')
-      {
-      this.ownerService.searchOwners(lastName)
-      .subscribe(
-      (owners) => {
-
-       this.owners = owners;
-       console.log('this.owners ' + this.owners);
-
-       },
-       (error) =>
-       {
-         this.owners = null;
-       }
-      );
-
-      }
   }
 
 

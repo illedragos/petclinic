@@ -46,38 +46,51 @@ test.describe('Owners Page', () => {
     expect(ApiClient.sorted(actualFullNames)).toEqual(ApiClient.sorted(expectedFullNames));
   });
 
-  test('filters owners by last name prefix', async ({ page }) => {
-    // Fetch all owners and choose a prefix
+  test('filters across visible columns (case-insensitive contains)', async ({ page }) => {
+    // Derive an interior, lowercase substring of some owner's city: a 'contains'
+    // term on a column other than last name, so it would not have matched the old
+    // prefix-on-last-name search.
     const allOwners = await apiClient.fetchOwners();
-    const prefix = ApiClient.choosePrefixFrom(allOwners);
+    const term = ApiClient.chooseContainsTermFrom(allOwners);
 
-    // Fetch filtered owners from API
-    const expectedFilteredOwners = await apiClient.fetchOwnersByPrefix(prefix);
-    const expectedFilteredFullNames = ApiClient.getFullNames(expectedFilteredOwners);
+    // Expected results computed client-side, mirroring the frontend filter.
+    const expectedOwners = ApiClient.filterByTerm(allOwners, term);
+    const expectedFullNames = ApiClient.getFullNames(expectedOwners);
 
-    // Open the owners page
     const ownersPage = new OwnersPage(page);
     await ownersPage.open();
 
-    // Perform search
-    await ownersPage.searchByLastNamePrefix(prefix);
-    await ownersPage.waitForOwnersCount(expectedFilteredFullNames.length);
+    await ownersPage.search(term);
+    await ownersPage.waitForOwnersCount(expectedFullNames.length);
 
-    // Get filtered results
-    const actualFilteredFullNames = await ownersPage.getOwnerFullNames();
+    const actualFullNames = await ownersPage.getOwnerFullNames();
 
-    // Assertions
-    expect(actualFilteredFullNames.length).toBeGreaterThan(0);
+    expect(actualFullNames.length).toBeGreaterThan(0);
+    expect(ApiClient.sorted(actualFullNames)).toEqual(ApiClient.sorted(expectedFullNames));
+  });
 
-    // Verify all results match the prefix
-    for (const fullName of actualFilteredFullNames) {
-      const lastName = ApiClient.extractLastName(fullName);
-      expect(lastName.toLowerCase()).toMatch(new RegExp(`^${prefix.toLowerCase()}`));
-    }
+  test('requires every whitespace-separated token to match', async ({ page }) => {
+    const allOwners = await apiClient.fetchOwners();
 
-    // Verify exact match with API results
-    expect(ApiClient.sorted(actualFilteredFullNames)).toEqual(
-      ApiClient.sorted(expectedFilteredFullNames)
-    );
+    // Build a two-token term from a single owner's last name + city, so that
+    // owner matches both tokens while the term spans two different columns.
+    const source = allOwners.find(o => o.lastName?.trim() && o.city?.trim());
+    expect(source).toBeTruthy();
+    const term = `${source!.lastName!.trim()} ${source!.city!.trim().split(/\s+/)[0]}`.toLowerCase();
+
+    const expectedOwners = ApiClient.filterByTerm(allOwners, term);
+    const expectedFullNames = ApiClient.getFullNames(expectedOwners);
+
+    const ownersPage = new OwnersPage(page);
+    await ownersPage.open();
+
+    await ownersPage.search(term);
+    await ownersPage.waitForOwnersCount(expectedFullNames.length);
+
+    const actualFullNames = await ownersPage.getOwnerFullNames();
+
+    expect(actualFullNames.length).toBeGreaterThan(0);
+    expect(actualFullNames).toContain(`${source!.firstName} ${source!.lastName}`.trim());
+    expect(ApiClient.sorted(actualFullNames)).toEqual(ApiClient.sorted(expectedFullNames));
   });
 });

@@ -9,6 +9,7 @@ import {FormsModule} from '@angular/forms';
 import {ActivatedRoute} from '@angular/router';
 import { OwnerService } from '../owner.service';
 import {Owner} from '../owner';
+import {Pet} from '../../pets/pet';
 import {Observable, of} from 'rxjs';
 import {RouterTestingModule} from '@angular/router/testing';
 import {CommonModule} from '@angular/common';
@@ -26,10 +27,6 @@ class OwnerServiceStub {
   getOwners(): Observable<Owner[]> {
     return of();
   }
-
-  searchOwners(lastName: string): Observable<Owner[]> {
-    return of();
-  }
 }
 
 describe('OwnerListComponent', () => {
@@ -38,18 +35,26 @@ describe('OwnerListComponent', () => {
   let fixture: ComponentFixture<OwnerListComponent>;
   let ownerService = new OwnerServiceStub();
   let getOwnersSpy: Spy;
-  let searchOwnersSpy: Spy;
   let de: DebugElement;
   let el: HTMLElement;
 
 
-  const testOwner: Owner = {
+  const franklin: Owner = {
     id: 1,
     firstName: 'George',
     lastName: 'Franklin',
     address: '110 W. Liberty St.',
     city: 'Madison',
     telephone: '6085551023',
+    pets: [{ name: 'Leo' } as Pet]
+  };
+  const davis: Owner = {
+    id: 2,
+    firstName: 'Betty',
+    lastName: 'Davis',
+    address: '638 Cardinal Ave.',
+    city: 'Sun Prairie',
+    telephone: '6085551749',
     pets: []
   };
   let testOwners: Owner[];
@@ -74,16 +79,13 @@ describe('OwnerListComponent', () => {
   }));
 
   beforeEach(() => {
-    testOwners = [testOwner];
+    testOwners = [franklin, davis];
 
     fixture = TestBed.createComponent(OwnerListComponent);
     component = fixture.componentInstance;
     ownerService = fixture.debugElement.injector.get(OwnerService);
     getOwnersSpy = spyOn(ownerService, 'getOwners')
       .and.returnValue(of(testOwners));
-    searchOwnersSpy = spyOn(ownerService, 'searchOwners')
-      .and.returnValue(of(testOwners));
-
   });
 
   it('should create OwnerListComponent', () => {
@@ -102,28 +104,64 @@ describe('OwnerListComponent', () => {
       fixture.detectChanges();        // update view with name
       de = fixture.debugElement.query(By.css('.ownerFullName'));
       el = de.nativeElement;
-      expect(el.innerText).toBe((testOwner.firstName.toString() + ' ' + testOwner.lastName.toString()));
+      expect(el.innerText).toBe((franklin.firstName.toString() + ' ' + franklin.lastName.toString()));
     });
   }));
 
-  it('searchByLastName should call getOwners for empty term', () => {
-    getOwnersSpy.calls.reset();
-    searchOwnersSpy.calls.reset();
+  describe('filteredOwners (client-side search over all visible columns)', () => {
+    beforeEach(() => {
+      component.owners = testOwners;
+    });
 
-    component.searchByLastName('');
+    it('returns all owners when the term is empty', () => {
+      component.filterTerm = '';
+      expect(component.filteredOwners).toEqual(testOwners);
+    });
 
-    expect(getOwnersSpy).toHaveBeenCalled();
-    expect(searchOwnersSpy).not.toHaveBeenCalled();
-  });
+    it('returns all owners when the term is only whitespace', () => {
+      component.filterTerm = '   ';
+      expect(component.filteredOwners).toEqual(testOwners);
+    });
 
-  it('searchByLastName should call searchOwners for non-empty term', () => {
-    getOwnersSpy.calls.reset();
-    searchOwnersSpy.calls.reset();
+    it('filters by city (a non-name column)', () => {
+      component.filterTerm = 'madison';
+      expect(component.filteredOwners).toEqual([franklin]);
+    });
 
-    component.searchByLastName('Fr');
+    it('matches case-insensitively', () => {
+      component.filterTerm = 'FRANKLIN';
+      expect(component.filteredOwners).toEqual([franklin]);
+    });
 
-    expect(searchOwnersSpy).toHaveBeenCalledWith('Fr');
-    expect(getOwnersSpy).not.toHaveBeenCalled();
+    it('matches using contains semantics, not prefix', () => {
+      component.filterTerm = 'ankl';
+      expect(component.filteredOwners).toEqual([franklin]);
+    });
+
+    it('matches by address substring', () => {
+      component.filterTerm = 'cardinal';
+      expect(component.filteredOwners).toEqual([davis]);
+    });
+
+    it('matches by telephone', () => {
+      component.filterTerm = '6085551749';
+      expect(component.filteredOwners).toEqual([davis]);
+    });
+
+    it('matches by pet name', () => {
+      component.filterTerm = 'leo';
+      expect(component.filteredOwners).toEqual([franklin]);
+    });
+
+    it('requires every token to match (across different columns)', () => {
+      component.filterTerm = 'davis prairie';
+      expect(component.filteredOwners).toEqual([davis]);
+    });
+
+    it('returns no rows when not all tokens match', () => {
+      component.filterTerm = 'davis madison';
+      expect(component.filteredOwners).toEqual([]);
+    });
   });
 
 });
