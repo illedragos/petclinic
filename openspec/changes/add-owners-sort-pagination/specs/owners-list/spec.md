@@ -23,7 +23,7 @@
 
 - **WHEN** a client issues `GET /api/owners` expecting every owner in one response
 - **THEN** the response is still a single page bounded by the default `size` (10)
-- **AND** there is no parameter combination that returns all owners unbounded in one page
+- **AND** because `size` is capped at 100 (see "Query parameter validation"), there is no parameter combination that returns all owners unbounded in one page
 
 ### Requirement: Server-side search across all visible columns
 
@@ -84,7 +84,14 @@
 #### Scenario: Pets is not a sortable column
 
 - **WHEN** a client requests `GET /api/owners?sort=pets,asc`
-- **THEN** the request does not sort by the pets collection (the server rejects it or falls back to the default order), never producing an ambiguous collection-based ordering
+- **THEN** the request is rejected with 400 (pets is not in the sortable allowlist)
+- **AND** no ambiguous collection-based ordering is ever produced
+
+#### Scenario: Default sort when none is supplied
+
+- **WHEN** a client issues `GET /api/owners` with no `sort` param
+- **THEN** owners are ordered by the Name chain `lastName ASC, firstName ASC, id ASC`
+- **AND** the list is never returned in an undefined/unsorted order
 
 ### Requirement: Pagination counts owners, not joined rows
 
@@ -96,6 +103,42 @@ When the result set is hydrated with each owner's pets (and pet types/visits) vi
 - **THEN** `content` holds 10 distinct owners (assuming at least 10 match)
 - **AND** each owner's `pets` are fully populated
 - **AND** `totalElements` equals the number of matching owners, not the number of owner-pet rows
+
+### Requirement: Query parameter validation
+
+`GET /api/owners` SHALL validate its query parameters and reject invalid input with HTTP 400 (RFC-7807 ProblemDetail), rather than coercing it into an unbounded or failing query. `page` MUST be an integer `>= 0`. `size` MUST be an integer in `[1, 100]`. `sort`, when present, MUST match one of the sortable columns (`name`, `address`, `city`, `telephone`) paired with a direction (`asc`/`desc`); `pets`, unknown columns, and unknown directions are invalid. `q` is an optional free-text string.
+
+#### Scenario: size=0 is rejected
+
+- **WHEN** a client issues `GET /api/owners?size=0`
+- **THEN** the response is 400
+- **AND** the server never executes a query with the LIMIT dropped (no accidental full-table return)
+
+#### Scenario: size above the cap is rejected
+
+- **WHEN** a client issues `GET /api/owners?size=1000000`
+- **THEN** the response is 400 (size exceeds the maximum of 100)
+
+#### Scenario: negative page is rejected
+
+- **WHEN** a client issues `GET /api/owners?page=-1`
+- **THEN** the response is 400
+- **AND** the server never issues a query with a negative OFFSET
+
+#### Scenario: non-integer page or size is rejected
+
+- **WHEN** a client issues `GET /api/owners?page=abc` or `GET /api/owners?size=2.5`
+- **THEN** the response is 400
+
+#### Scenario: malformed sort is rejected
+
+- **WHEN** a client issues `GET /api/owners?sort=name,sideways` or `GET /api/owners?sort=unknown,asc`
+- **THEN** the response is 400
+
+#### Scenario: valid params within bounds are accepted
+
+- **WHEN** a client issues `GET /api/owners?page=0&size=20&sort=city,desc&q=ma`
+- **THEN** the request succeeds (200) and is processed with those values
 
 ### Requirement: Owners list screen is fully server-driven
 
@@ -142,19 +185,31 @@ The list SHALL support single-column sorting only. Clicking a new column header 
 - **THEN** the list sorts by City descending
 - **AND** clicking again returns to City ascending (never to "no sort")
 
-### Requirement: Page, size, and sort live in the URL
+#### Scenario: Fresh load defaults to Name ascending
 
-The current `page`, `size`, and `sort` SHALL be reflected in the URL query string so the view is bookmarkable, shareable, and back-button friendly. Changing the search term, page size, or sort SHALL reset the page index to the first page (0).
+- **WHEN** the Owners screen loads with no `sort` in the URL
+- **THEN** the Name column is the active sort, ascending, and its header shows the active ascending indicator
+- **AND** the table is never shown without an active sorted column
 
-#### Scenario: Deep link restores list state
+### Requirement: Search term, page, size, and sort live in the URL
 
-- **WHEN** the user opens a URL carrying `page`, `size`, and `sort` query params
-- **THEN** the list loads that exact page, size, and sort
+The current search term `q`, `page`, `size`, and `sort` SHALL all be reflected in the URL query string so the view is bookmarkable, shareable, and back-button friendly. Changing the search term, page size, or sort SHALL reset the page index to the first page (0).
+
+#### Scenario: Deep link restores list state including the search term
+
+- **WHEN** the user opens a URL carrying `q`, `page`, `size`, and `sort` query params
+- **THEN** the list loads that exact search term, page, size, and sort
+- **AND** the search input shows the term from the URL
 
 #### Scenario: Back button restores the previous list state
 
 - **WHEN** the user changes sort and then presses the browser back button
-- **THEN** the list returns to the previous sort/page/size state encoded in the URL
+- **THEN** the list returns to the previous `q`/sort/page/size state encoded in the URL
+
+#### Scenario: Back button restores a previous search term
+
+- **WHEN** the user types a search term (navigating the URL) and then presses the browser back button
+- **THEN** the search input and results return to the prior term
 
 #### Scenario: Filter, size, or sort change snaps to page 1
 
@@ -170,3 +225,18 @@ While a list fetch is in flight, the previously rendered rows SHALL remain visib
 - **WHEN** a new page/sort/search fetch is in progress
 - **THEN** the existing rows stay visible and dimmed
 - **AND** a spinner overlay is shown until the new page arrives
+
+### Requirement: Search input is debounced
+
+Because search now executes server-side, the list SHALL debounce the search input (~300 ms) so that a burst of keystrokes results in a single request for the final term, not one request per keystroke.
+
+#### Scenario: Rapid typing issues one request
+
+- **WHEN** the user types several characters in quick succession
+- **THEN** the frontend waits for the input to settle (~300 ms) before issuing a single `GET /api/owners` for the final term
+- **AND** intermediate keystrokes do not each trigger their own request
+
+#### Scenario: Settled term triggers exactly one fetch
+
+- **WHEN** the user stops typing
+- **THEN** exactly one search request is issued for the current term, resetting to page 0

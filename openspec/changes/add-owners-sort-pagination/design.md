@@ -26,7 +26,6 @@ Current state worth pinning:
 - Removing `GET /api/owners/count`.
 - Case-insensitive *prefix* lastName search (replaced wholesale by `?q=` contains).
 - Wiring `api-types.ts` into `OwnerService` beyond what this change needs.
-- Debounced typing on the search filter.
 - Persisting page size across sessions.
 - A generic, reusable `PageDto<T>` (Vets/Visits pagination is not in scope).
 
@@ -44,10 +43,11 @@ Concrete hand-written `OwnerPageDto { content: OwnerDto[]; totalElements; totalP
 - **Why in place, not a new endpoint:** single full-stack repo; a parallel array endpoint would be dead weight and a second contract to keep in sync.
 - **Alternatives considered:** generic `PageDto<T>`; idiomatic `{ data, total, page, pageSize }` rename (rejected — would force rewriting the already-correct `owner-page.ts` and diverge from the design).
 
-### D3 — Always paginated; no unpaged mode
-A bare `GET /api/owners` returns page 0, size 10. There is no "return everything" escape hatch.
-- **Why:** an unbounded "give me all" path at 100k owners is exactly what pagination exists to prevent. The e2e oracle, which needs the full set to compute expectations, instead requests an explicit large `size`.
-- **Alternative considered:** Spring-style `Pageable.unpaged()` when `page`/`size` are omitted — rejected; reintroduces the unbounded query.
+### D3 — Always paginated; no unpaged mode; `size` capped
+A bare `GET /api/owners` returns page 0, size 10. There is no "return everything" escape hatch, and the promise is **enforced**: `size` is bounded to `[1, 100]` (see D8). An uncapped `size` (e.g. `?size=1000000`) would silently re-open the unpaged mode this decision exists to kill, so the cap is part of the contract, not a nicety.
+- **Why:** an unbounded "give me all" path at 100k owners is exactly what pagination exists to prevent. The e2e oracle, which needs the full set to compute expectations, **pages through** (fetch page 0, read `totalPages`, fetch the rest) rather than requesting one huge `size` — so the test exercises the real paginated contract instead of a hole in it.
+- **Alternatives considered:** Spring-style `Pageable.unpaged()` when `page`/`size` are omitted — rejected; reintroduces the unbounded query. Letting `size` be arbitrarily large with the oracle slurping everything — rejected; that *is* unpaged mode wearing a query param.
+- **Max value:** 100. Comfortably above the largest UI page size (20) with headroom; small enough that a single page is never a scale problem.
 
 ### D4 — Name column: phonebook ("Lastname, Firstname"), sort `lastName, firstName, id`
 Resolves the comment-1-vs-comment-2 contradiction in favour of comment 1.
@@ -61,7 +61,7 @@ The design listed only Name/Address/City; Telephone's omission is treated as an 
 - City → `city, lastName, firstName, id`
 - Telephone → `telephone, lastName, firstName, id`
 
-The chain is **server-built**: the client never sends a multi-column sort. Direction applies to the leading column; the tiebreakers stay ASC.
+The chain is **server-built**: the client never sends a multi-column sort. Direction applies to the leading column; the tiebreakers stay ASC. An unsortable or unknown sort column (`pets`, anything not in the allowlist) or a bad direction is **rejected with 400**, not silently defaulted — see D8. (The earlier "rejects it or falls back" hedge is resolved here in favour of reject, for one consistent contract.)
 
 ### D6 — Query execution: single `getManyAndCount` builder
 One TypeORM `QueryBuilder`: `leftJoinAndSelect` `owner.pets`, `pet.type`, `pet.visits` (hydration for display); `WHERE` built per token as `(lower(col) LIKE :t OR … OR EXISTS(pet-name subquery))` AND-ed across tokens; `orderBy` the server-built sort chain; `skip(page*size).take(size)`; `getManyAndCount()`.
@@ -77,6 +77,26 @@ One TypeORM `QueryBuilder`: `leftJoinAndSelect` `owner.pets`, `pet.type`, `pet.v
 - All under the project's red-green TDD modifier: failing test first, confirm red, then implement.
 - "WebMvcTest" from the design has no equivalent here; the controller-level Jest test is its translation.
 
+### D8 — Validated query-params DTO (closes the unbounded/500 footguns)
+The controller takes a single `@Query() ListOwnersQueryDto` validated by the existing global `ValidationPipe` (`transform: true`, `whitelist: true`, `enableImplicitConversion: false`, RFC-7807 factory). Bounds:
+- `page`: integer, `>= 0`, default 0.
+- `size`: integer, `1 <= size <= 100` (the D3 cap), default 10.
+- `q`: optional string, default `''`.
+- `sort`: optional string matching `^(name|address|city|telephone),(asc|desc)$` (case-insensitive); anything else → 400.
+
+Because `enableImplicitConversion: false`, `page`/`size` need explicit `@Type(() => Number)` to coerce the string query values before `@IsInt`. Invalid input renders as a 400 ProblemDetail via the existing exception filter — no new error plumbing.
+- **Why this is not optional polish:** raw `@Query` here is two real bugs, not just a convention miss. `?size=0` → `take(0)`, which TypeORM treats as falsy and may drop the `LIMIT` entirely → every row returned (another accidental unpaged path). `?page=-1` → `skip(-N)` → negative `OFFSET` → Postgres 500. The DTO bounds make both unreachable, and it restores the repo's class-validator-on-inputs convention.
+- **Alternative considered:** clamp out-of-range values silently (e.g. coerce `size=1000`→100, `page=-1`→0) — rejected in favour of 400 for one predictable contract; the frontend only ever sends valid values, so 400 only fires on hand-crafted URLs.
+
+### D9 — Default sort is `name,asc` (keeps "never unsorted" honest)
+When no `sort` param is supplied, the server orders by the Name chain (`lastName, firstName, id`) ascending — not by bare `id`. The frontend reflects this on a fresh load (no URL sort): the Name header shows the active ascending arrow.
+- **Why:** the UI contract says sort never clears to an unsorted state, yet a fresh load had no defined sort. Defaulting to a *visible* column (Name) means there is always an active, arrow-bearing column — a bare-`id` default would show no active header and contradict that invariant. Name also matches the phonebook display order (D4).
+
+### D10 — Search term `q` is part of URL state, and typing is debounced
+`q` joins `page`/`size`/`sort` in the URL query string (bookmarkable, shareable, back-button restores the typed term). Keystrokes are debounced (~300 ms) before issuing the request, and each fetch resets to page 0.
+- **Why q in URL:** the original "live in the URL" requirement listed `page`/`size`/`sort` and silently omitted `q`, so a search was neither shareable nor back-button restorable. Putting `q` in the URL is the consistent, expected behaviour.
+- **Why debounce (supersedes the earlier "debounce is out of scope" non-goal):** that non-goal made sense for a *client-side* instant filter. Moving search server-side turns every keystroke into an HTTP round-trip; without debounce the previously-instant box becomes chatty and laggy. For a server-backed search box, debounce is effectively mandatory, so it is pulled into scope.
+
 ## Risks / Trade-offs
 
 - **TypeORM pagination + collection join miscounts a page** → mitigated by D6's root-only sort + `EXISTS` match and the explicit "page holds N owners" guard test; documented two-query fallback.
@@ -85,11 +105,12 @@ One TypeORM `QueryBuilder`: `leftJoinAndSelect` `owner.pets`, `pet.type`, `pet.v
 - **Displayed-name change ("Lastname, Firstname")** → updates every e2e name assertion and `getFullNames`; acceptable because the e2e suite is being rewritten anyway.
 - **`q` `LIKE '%term%'` is not index-friendly at 100k** → acceptable for this change; trigram/full-text indexing is a later optimisation, not a contract change.
 - **Sort by nullable text columns** → Postgres default null-ordering is acceptable; the `id` tiebreaker keeps results deterministic regardless.
+- **Malicious/hand-crafted query params** (`size=0` dropping the LIMIT, `page=-1` → negative OFFSET 500, `size=1e6` re-opening unpaged mode, bad `sort`) → closed by the D8 validated DTO with bounds + the D3 `size` cap; a 400-on-bad-params test pins it.
 
 ## Migration Plan
 
-1. Backend: add `OwnerPageDto` + Swagger, rework `listOwners`, add sort-chain helper, regenerate `openapi.yaml` + `api-types.ts`, get guardrail green.
-2. Frontend: wire `OwnerService` to the paginated endpoint, rebuild `owner-list` with `matSort` + `mat-paginator` + URL state + "Lastname, Firstname", remove dead `searchOwners()`.
+1. Backend: add `OwnerPageDto` + `ListOwnersQueryDto` (D8) + Swagger, rework `listOwners` (default sort D9), add sort-chain helper, regenerate `openapi.yaml` + `api-types.ts`, get guardrail green.
+2. Frontend: wire `OwnerService` to the paginated endpoint, rebuild `owner-list` with `matSort` + `mat-paginator` + URL state (incl. `q`, D10) + debounced search + "Lastname, Firstname", remove dead `searchOwners()`.
 3. E2E: rewrite specs/pages/api-client for the paginated model.
 - **Rollback:** revert the change; the endpoint returns to `OwnerDto[]`. No DB migration is involved (no schema change), so rollback is code-only.
 
