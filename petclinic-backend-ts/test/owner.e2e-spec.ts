@@ -77,26 +77,151 @@ describe('OwnerController (e2e)', () => {
     expect(Number(res.text)).toBe(1);
   });
 
-  it('getAll', async () => {
+  it('getAll returns a paginated OwnerPageDto envelope with default page 0 / size 10', async () => {
     if (!available) return;
     const res = await http().get('/api/owners').expect(200);
     expect(res.headers['content-type']).toMatch(/application\/json/);
-    const match = res.body.find((o: { id: number }) => o.id === ownerId);
+    expect(Array.isArray(res.body.content)).toBe(true);
+    expect(res.body.number).toBe(0);
+    expect(res.body.size).toBe(10);
+    expect(typeof res.body.totalElements).toBe('number');
+    expect(typeof res.body.totalPages).toBe('number');
+    const match = res.body.content.find((o: { id: number }) => o.id === ownerId);
     expect(match).toMatchObject({ id: ownerId, firstName: 'George', lastName: 'Franklin' });
+    // owners carry their full pets projection
+    expect(Array.isArray(match.pets)).toBe(true);
+    expect(match.pets.map((p: { name: string }) => p.name)).toContain('Rosy');
   });
 
-  it('getAllWithLastNameFilter', async () => {
-    if (!available) return;
-    const owner2 = await saveOwner(ds, { lastName: 'Zephyrson' });
-    const res = await http().get('/api/owners?lastName=Zephyr').expect(200);
-    const match = res.body.find((o: { id: number }) => o.id === owner2.id);
-    expect(match).toMatchObject({ id: owner2.id, lastName: 'Zephyrson' });
-  });
+  describe('GET /api/owners — list: validation, search, sort, pagination', () => {
+    // Replace the single outer fixture with a controlled multi-owner dataset.
+    beforeEach(async () => {
+      if (!available) return;
+      await cleanDatabase();
+      const dog = await savePetType(ds, 'dog');
+      const seed = async (
+        firstName: string,
+        lastName: string,
+        address: string,
+        city: string,
+        telephone: string,
+        petNames: string[],
+      ): Promise<void> => {
+        const owner = await saveOwner(ds, { firstName, lastName, address, city, telephone });
+        for (const name of petNames) {
+          await savePet(ds, owner, dog, { name });
+        }
+      };
+      await seed('Betty', 'Davis', '638 Cardinal Ave.', 'Sun Prairie', '6085551749', ['Basil']);
+      await seed('Harold', 'Davis', '563 Friendly St.', 'Windsor', '6085553198', ['Iggy']);
+      await seed('Peter', 'Estaban', '2387 S. Fair Way', 'Madison', '6085552765', ['Lucky', 'Sly']);
+      await seed('George', 'Franklin', '110 W. Liberty St.', 'Madison', '6085551023', ['Leo']);
+      await seed('Eduardo', 'Rodriquez', '2693 Commerce St.', 'McFarland', '6085558763', [
+        'Rosy',
+        'Jewel',
+        'Iggy',
+      ]);
+    });
 
-  it('getAllWithNameFilter_notFound', async () => {
-    if (!available) return;
-    const res = await http().get('/api/owners?lastName=NonExistent').expect(200);
-    expect(res.body).toEqual([]);
+    const names = (body: { content: Array<{ firstName: string; lastName: string }> }): string[] =>
+      body.content.map((o) => `${o.lastName}, ${o.firstName}`);
+
+    // ---- validation (task 2.1) ----
+    it.each([
+      ['size=0 drops no LIMIT', '/api/owners?size=0'],
+      ['size over cap', '/api/owners?size=1000000'],
+      ['negative page', '/api/owners?page=-1'],
+      ['non-integer page', '/api/owners?page=abc'],
+      ['fractional size', '/api/owners?size=2.5'],
+      ['bad sort direction', '/api/owners?sort=name,sideways'],
+      ['pets not sortable', '/api/owners?sort=pets,asc'],
+      ['unknown sort column', '/api/owners?sort=unknown,asc'],
+    ])('rejects invalid query (%s) with 400', async (_label, url) => {
+      if (!available) return;
+      await http().get(url).expect(400);
+    });
+
+    it('accepts valid params within bounds (200)', async () => {
+      if (!available) return;
+      await http().get('/api/owners?page=0&size=20&sort=city,desc&q=ma').expect(200);
+    });
+
+    // ---- search ?q= parity (task 3.1) ----
+    it('q matches a single token across columns (city)', async () => {
+      if (!available) return;
+      const res = await http().get('/api/owners?q=madi&size=100').expect(200);
+      expect(res.body.totalElements).toBe(2);
+      expect(names(res.body).sort()).toEqual(['Estaban, Peter', 'Franklin, George'].sort());
+    });
+
+    it('q requires every whitespace token to match (in any column)', async () => {
+      if (!available) return;
+      const res = await http().get('/api/owners?q=davis%20sun&size=100').expect(200);
+      expect(res.body.totalElements).toBe(1);
+      expect(names(res.body)).toEqual(['Davis, Betty']);
+    });
+
+    it('q matches a pet name and counts each owner once', async () => {
+      if (!available) return;
+      const res = await http().get('/api/owners?q=iggy&size=100').expect(200);
+      // Rodriquez (Iggy among 3 pets) + Davis Harold (Iggy) = 2, no duplicates.
+      expect(res.body.totalElements).toBe(2);
+      expect(names(res.body).sort()).toEqual(['Davis, Harold', 'Rodriquez, Eduardo'].sort());
+    });
+
+    it('empty q matches every owner', async () => {
+      if (!available) return;
+      const res = await http().get('/api/owners?q=&size=100').expect(200);
+      expect(res.body.totalElements).toBe(5);
+    });
+
+    // ---- sort (task 4 — e2e confidence on top of the unit test) ----
+    it('default sort (no param) is name asc: lastName, firstName, id', async () => {
+      if (!available) return;
+      const res = await http().get('/api/owners?size=100').expect(200);
+      expect(names(res.body)).toEqual([
+        'Davis, Betty',
+        'Davis, Harold',
+        'Estaban, Peter',
+        'Franklin, George',
+        'Rodriquez, Eduardo',
+      ]);
+    });
+
+    it('sort=city,asc expands to city, lastName, firstName, id', async () => {
+      if (!available) return;
+      const res = await http().get('/api/owners?sort=city,asc&size=100').expect(200);
+      expect(names(res.body)).toEqual([
+        'Estaban, Peter', // Madison
+        'Franklin, George', // Madison
+        'Rodriquez, Eduardo', // McFarland
+        'Davis, Betty', // Sun Prairie
+        'Davis, Harold', // Windsor
+      ]);
+    });
+
+    // ---- pagination counts owners, not joined rows (task 5.1) ----
+    it('a full page holds N distinct owners even when owners have many pets', async () => {
+      if (!available) return;
+      const res = await http().get('/api/owners?size=5').expect(200);
+      const ids = res.body.content.map((o: { id: number }) => o.id);
+      expect(new Set(ids).size).toBe(5); // 5 distinct owners, not 7 owner-pet join rows
+      expect(res.body.totalElements).toBe(5); // counts owners
+      expect(res.body.content.length).toBe(5);
+    });
+
+    it('paginates: size=2 yields 3 pages over 5 owners', async () => {
+      if (!available) return;
+      const p0 = await http().get('/api/owners?size=2&sort=name,asc').expect(200);
+      expect(p0.body.number).toBe(0);
+      expect(p0.body.size).toBe(2);
+      expect(p0.body.totalElements).toBe(5);
+      expect(p0.body.totalPages).toBe(3);
+      expect(names(p0.body)).toEqual(['Davis, Betty', 'Davis, Harold']);
+
+      const p2 = await http().get('/api/owners?size=2&page=2&sort=name,asc').expect(200);
+      expect(names(p2.body)).toEqual(['Rodriquez, Eduardo']);
+    });
   });
 
   it('update_ok', async () => {

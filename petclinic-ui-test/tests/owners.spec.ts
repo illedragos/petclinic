@@ -1,96 +1,146 @@
 import { test, expect } from '@playwright/test';
 import { OwnersPage } from './pages/OwnersPage';
-import { ApiClient } from './support/api-client';
-import * as fs from 'fs';
-import * as path from 'path';
+import { ApiClient, OwnerDto } from './support/api-client';
 
-test.describe('Owners Page', () => {
+const DEFAULT_SIZE = 10;
+
+test.describe('Owners Page (server-side search, sort, pagination)', () => {
   let apiClient: ApiClient;
-  let screenshotDir: string;
+  let allOwners: OwnerDto[];
 
-  test.beforeAll(() => {
+  test.beforeAll(async () => {
     apiClient = new ApiClient();
-    screenshotDir = path.join(__dirname, '..', 'test-results', 'screenshots');
-    if (!fs.existsSync(screenshotDir)) {
-      fs.mkdirSync(screenshotDir, { recursive: true });
-    }
+    allOwners = await apiClient.fetchAllOwners();
+    expect(allOwners.length).toBeGreaterThan(DEFAULT_SIZE); // need >1 page for these tests
   });
 
-  test.afterEach(async ({ page }, testInfo) => {
-    // Capture screenshot after each test
-    const sanitizedTitle = testInfo.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const screenshotPath = path.join(screenshotDir, `${sanitizedTitle}_${timestamp}.png`);
-
-    await page.screenshot({ path: screenshotPath, fullPage: true });
-    console.log(`Screenshot saved: ${screenshotPath}`);
-  });
-
-  test('shows all owners on initial load', async ({ page }) => {
+  test('initial load shows page 0, default Name-ascending sort', async ({ page }) => {
     const ownersPage = new OwnersPage(page);
-
-    // Fetch expected owners from API
-    const expectedOwners = await apiClient.fetchOwners();
-    const expectedFullNames = ApiClient.getFullNames(expectedOwners);
-
-    // Open the owners page
     await ownersPage.open();
 
-    // Wait for the expected number of owners
-    await ownersPage.waitForOwnersCount(expectedFullNames.length);
+    const expected = await apiClient.fetchOwnersPage({ page: 0, size: DEFAULT_SIZE });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expected.content));
 
-    // Get actual owner names from the page
-    const actualFullNames = await ownersPage.getOwnerFullNames();
-
-    // Assert that all expected owners are displayed
-    expect(ApiClient.sorted(actualFullNames)).toEqual(ApiClient.sorted(expectedFullNames));
+    // Name column is the active ascending sort on a fresh load (D9).
+    expect(await ownersPage.getAriaSort('name')).toBe('ascending');
+    expect(await ownersPage.getRangeLabel()).toContain(`of ${expected.totalElements}`);
   });
 
-  test('filters across visible columns (case-insensitive contains)', async ({ page }) => {
-    // Derive an interior, lowercase substring of some owner's city: a 'contains'
-    // term on a column other than last name, so it would not have matched the old
-    // prefix-on-last-name search.
-    const allOwners = await apiClient.fetchOwners();
+  test('search (?q=) matches case-insensitive contains across columns', async ({ page }) => {
     const term = ApiClient.chooseContainsTermFrom(allOwners);
 
-    // Expected results computed client-side, mirroring the frontend filter.
-    const expectedOwners = ApiClient.filterByTerm(allOwners, term);
-    const expectedFullNames = ApiClient.getFullNames(expectedOwners);
-
     const ownersPage = new OwnersPage(page);
     await ownersPage.open();
-
     await ownersPage.search(term);
-    await ownersPage.waitForOwnersCount(expectedFullNames.length);
 
-    const actualFullNames = await ownersPage.getOwnerFullNames();
-
-    expect(actualFullNames.length).toBeGreaterThan(0);
-    expect(ApiClient.sorted(actualFullNames)).toEqual(ApiClient.sorted(expectedFullNames));
+    const expected = await apiClient.fetchOwnersPage({ q: term, page: 0, size: DEFAULT_SIZE });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expected.content));
+    // The server count must equal the oracle's full-set filter count.
+    expect(expected.totalElements).toBe(ApiClient.filterByTerm(allOwners, term).length);
   });
 
-  test('requires every whitespace-separated token to match', async ({ page }) => {
-    const allOwners = await apiClient.fetchOwners();
-
-    // Build a two-token term from a single owner's last name + city, so that
-    // owner matches both tokens while the term spans two different columns.
-    const source = allOwners.find(o => o.lastName?.trim() && o.city?.trim());
-    expect(source).toBeTruthy();
-    const term = `${source!.lastName!.trim()} ${source!.city!.trim().split(/\s+/)[0]}`.toLowerCase();
-
-    const expectedOwners = ApiClient.filterByTerm(allOwners, term);
-    const expectedFullNames = ApiClient.getFullNames(expectedOwners);
+  test('search requires every whitespace token to match', async ({ page }) => {
+    // Build a two-token term (lastName + city) from one owner spanning two columns.
+    const source = allOwners.find((o) => o.lastName?.trim() && o.city?.trim())!;
+    const term = `${source.lastName!.trim()} ${source.city!.trim().split(/\s+/)[0]}`.toLowerCase();
 
     const ownersPage = new OwnersPage(page);
     await ownersPage.open();
-
     await ownersPage.search(term);
-    await ownersPage.waitForOwnersCount(expectedFullNames.length);
 
-    const actualFullNames = await ownersPage.getOwnerFullNames();
+    const expected = await apiClient.fetchOwnersPage({ q: term, page: 0, size: DEFAULT_SIZE });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expected.content));
+    expect(expected.totalElements).toBeGreaterThan(0);
+  });
 
-    expect(actualFullNames.length).toBeGreaterThan(0);
-    expect(actualFullNames).toContain(`${source!.firstName} ${source!.lastName}`.trim());
-    expect(ApiClient.sorted(actualFullNames)).toEqual(ApiClient.sorted(expectedFullNames));
+  test('typing is debounced into a single request', async ({ page }) => {
+    const ownersPage = new OwnersPage(page);
+    await ownersPage.open();
+
+    // Count search requests (those carrying ?q=) fired during a fast burst.
+    let searchRequests = 0;
+    page.on('request', (req) => {
+      const u = new URL(req.url());
+      if (req.method() === 'GET' && u.pathname.endsWith('/api/owners') && u.searchParams.has('q')) {
+        searchRequests += 1;
+      }
+    });
+
+    const term = 'london';
+    await ownersPage.typeSearch(term);
+
+    const expected = await apiClient.fetchOwnersPage({ q: term, page: 0, size: DEFAULT_SIZE });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expected.content));
+
+    // A 6-char burst must not produce 6 requests — debounce coalesces them.
+    expect(searchRequests).toBeLessThan(term.length);
+    expect(searchRequests).toBeGreaterThanOrEqual(1);
+  });
+
+  test('sorting by a column toggles ascending then descending', async ({ page }) => {
+    const ownersPage = new OwnersPage(page);
+    await ownersPage.open();
+
+    // Click City -> ascending.
+    await ownersPage.clickSort('city');
+    let expected = await apiClient.fetchOwnersPage({ sort: 'city,asc', page: 0, size: DEFAULT_SIZE });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expected.content));
+    expect(await ownersPage.getAriaSort('city')).toBe('ascending');
+    expect(ownersPage.urlParams().get('sort')).toBe('city,asc');
+
+    // Click City again -> descending (toggle, never clears).
+    await ownersPage.clickSort('city');
+    expected = await apiClient.fetchOwnersPage({ sort: 'city,desc', page: 0, size: DEFAULT_SIZE });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expected.content));
+    expect(await ownersPage.getAriaSort('city')).toBe('descending');
+    expect(ownersPage.urlParams().get('sort')).toBe('city,desc');
+  });
+
+  test('pagination: next page, and page-size change snaps to page 0', async ({ page }) => {
+    const ownersPage = new OwnersPage(page);
+    await ownersPage.open();
+
+    // Next page -> server page 1.
+    await ownersPage.nextPage();
+    let expected = await apiClient.fetchOwnersPage({ page: 1, size: DEFAULT_SIZE });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expected.content));
+    expect(ownersPage.urlParams().get('page')).toBe('1');
+
+    // Change page size to 5 -> snaps back to page 0.
+    await ownersPage.setPageSize(5);
+    expected = await apiClient.fetchOwnersPage({ page: 0, size: 5 });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expected.content));
+    expect(ownersPage.urlParams().get('size')).toBe('5');
+    expect(ownersPage.urlParams().get('page')).toBe('0');
+    expect(await ownersPage.getRangeLabel()).toContain(`of ${expected.totalElements}`);
+  });
+
+  test('deep link restores q, sort, page and size from the URL', async ({ page }) => {
+    const term = ApiClient.chooseContainsTermFrom(allOwners);
+    const ownersPage = new OwnersPage(page);
+    await ownersPage.open(`?q=${encodeURIComponent(term)}&sort=city,desc&size=5&page=0`);
+
+    const expected = await apiClient.fetchOwnersPage({ q: term, sort: 'city,desc', size: 5, page: 0 });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expected.content));
+
+    await expect(ownersPage.searchInput).toHaveValue(term);
+    expect(await ownersPage.getAriaSort('city')).toBe('descending');
+  });
+
+  test('back button restores the previous search term', async ({ page }) => {
+    const ownersPage = new OwnersPage(page);
+    const termA = ApiClient.chooseContainsTermFrom(allOwners);
+
+    await ownersPage.open(`?q=${encodeURIComponent(termA)}`);
+    const expectedA = await apiClient.fetchOwnersPage({ q: termA, page: 0, size: DEFAULT_SIZE });
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expectedA.content));
+
+    // Change the term, then go back.
+    await ownersPage.search('zzz-no-such-owner');
+    await ownersPage.expectNames([]); // no matches
+
+    await page.goBack();
+    await expect(ownersPage.searchInput).toHaveValue(termA);
+    await ownersPage.expectNames(ApiClient.getPhonebookNames(expectedA.content));
   });
 });

@@ -8,43 +8,66 @@
           <label class="col-sm-2 control-label">Search </label>
           <div class="col-sm-10">
             <input class="form-control" size="30" maxlength="80"
-                   id="searchTerm" name="searchTerm" [(ngModel)]="filterTerm"
+                   id="searchTerm" name="searchTerm"
+                   [ngModel]="filterTerm" (ngModelChange)="onSearchInput($event)"
                    placeholder="Search owners across all columns"/> <span class="help-inline"></span>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="table-responsive" id="ownersTable" *ngIf="owners">
-      <table class="table table-striped">
-        <thead>
-        <tr>
-          <th>Name</th>
-          <th>Address</th>
-          <th>City</th>
-          <th>Telephone</th>
-          <th>Pets</th>
-        </tr>
-        </thead>
+    <div *ngIf="!hasLoadedOnce" id="ownersLoading" class="owners-initial-loading">
+      <mat-spinner [diameter]="40"></mat-spinner>
+    </div>
 
-        <tbody>
-        <tr *ngFor="let owner of filteredOwners">
-          <td class="ownerFullName"><a routerLink="/owners/{{owner.id}}" routerLinkActive="active"
-                                       (click)="onSelect(owner)">{{ owner.firstName }} {{ owner.lastName }}</a></td>
-          <td>{{ owner.address }}</td>
-          <td>{{ owner.city }}</td>
-          <td>{{ owner.telephone }}</td>
-          <td>
-            <span *ngFor="let pet of owner.pets">{{ pet.name }} </span>
-          </td>
-        </tr>
-        </tbody>
-      </table>
-      <div *ngIf="filteredOwners.length === 0" id="noOwnersMatch">
-        No owners match "{{ filterTerm }}"
+    <div class="owners-table-wrap" [class.loading]="loading" *ngIf="hasLoadedOnce">
+      <div class="table-responsive" id="ownersTable">
+        <table class="table table-striped"
+               matSort [matSortActive]="sortActive" [matSortDirection]="sortDirection"
+               matSortDisableClear (matSortChange)="onSort($event)">
+          <thead>
+          <tr>
+            <th mat-sort-header="name">Name</th>
+            <th mat-sort-header="address">Address</th>
+            <th mat-sort-header="city">City</th>
+            <th mat-sort-header="telephone">Telephone</th>
+            <th>Pets</th>
+          </tr>
+          </thead>
+
+          <tbody>
+          <tr *ngFor="let owner of owners">
+            <td class="ownerFullName"><a routerLink="/owners/{{owner.id}}" routerLinkActive="active"
+                                         (click)="onSelect(owner)">{{ owner.lastName }}, {{ owner.firstName }}</a></td>
+            <td>{{ owner.address }}</td>
+            <td>{{ owner.city }}</td>
+            <td>{{ owner.telephone }}</td>
+            <td>
+              <span *ngFor="let pet of owner.pets">{{ pet.name }} </span>
+            </td>
+          </tr>
+          </tbody>
+        </table>
       </div>
+
+      <div *ngIf="totalElements === 0" id="noOwnersMatch">
+        No owners match "{{ q }}"
+      </div>
+
+      <mat-paginator id="ownersPaginator"
+                     [length]="totalElements"
+                     [pageSize]="size"
+                     [pageIndex]="page"
+                     [pageSizeOptions]="pageSizeOptions"
+                     (page)="onPage($event)">
+      </mat-paginator>
+
+      <div class="owners-spinner-overlay" *ngIf="loading">
+        <mat-spinner [diameter]="40"></mat-spinner>
+      </div>
+
       <div>
-        <button *ngIf="isOwnersDataReceived" class="btn btn-default" (click)="addOwner()">Add Owner</button>
+        <button class="btn btn-default" (click)="addOwner()">Add Owner</button>
       </div>
     </div>
   </div>

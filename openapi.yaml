@@ -189,19 +189,46 @@ paths:
       operationId: listOwners
       parameters:
       - in: query
-        name: lastName
+        name: q
         required: false
+        description: Full-text search across firstName, lastName, address, city,
+          telephone, and pet names.
         schema:
           type: string
           default: ""
+      - in: query
+        name: page
+        required: false
+        description: Zero-based page index.
+        schema:
+          type: integer
+          format: int32
+          default: 0
+          minimum: 0
+      - in: query
+        name: size
+        required: false
+        description: Page size.
+        schema:
+          type: integer
+          format: int32
+          default: 10
+          minimum: 1
+          maximum: 100
+      - in: query
+        name: sort
+        required: false
+        description: 'Sort as "<column>,<dir>". Columns: name, address, city, telephone.
+          Direction: asc, desc.'
+        schema:
+          type: string
+          example: name,asc
       responses:
         "200":
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/OwnerDto"
+                $ref: "#/components/schemas/OwnerPageDto"
           description: OK
         "400":
           content:
@@ -1485,6 +1512,40 @@ components:
       - lastName
       - pets
       - telephone
+    OwnerPageDto:
+      type: object
+      properties:
+        content:
+          type: array
+          description: The owners on this page.
+          items:
+            $ref: "#/components/schemas/OwnerDto"
+        number:
+          type: integer
+          format: int32
+          description: The 0-based index of this page.
+          example: 0
+        size:
+          type: integer
+          format: int32
+          description: The page size used for this page.
+          example: 10
+        totalElements:
+          type: integer
+          format: int64
+          description: Total number of owners matching the filter.
+          example: 42
+        totalPages:
+          type: integer
+          format: int32
+          description: Total number of pages for the current page size.
+          example: 5
+      required:
+      - content
+      - number
+      - size
+      - totalElements
+      - totalPages
     OwnerFieldsDto:
       type: object
       properties:

@@ -14,6 +14,22 @@ export interface OwnerDto {
   pets?: PetDto[];
 }
 
+/** Mirrors the backend OwnerPageDto (Spring Page shape; `number` is 0-based). */
+export interface OwnerPage {
+  content: OwnerDto[];
+  totalElements: number;
+  totalPages: number;
+  number: number;
+  size: number;
+}
+
+export interface OwnerQuery {
+  q?: string;
+  page?: number;
+  size?: number;
+  sort?: string;
+}
+
 export interface VisitDto {
   id: number;
   date: string;
@@ -35,16 +51,29 @@ export class ApiClient {
     });
   }
 
-  async fetchOwners(): Promise<OwnerDto[]> {
-    const response = await this.client.get<OwnerDto[]>('/owners');
+  /** Fetches one page of owners with the given query — mirrors the UI's request. */
+  async fetchOwnersPage(query: OwnerQuery = {}): Promise<OwnerPage> {
+    const response = await this.client.get<OwnerPage>('/owners', { params: query });
     return response.data;
   }
 
-  async fetchOwnersByPrefix(prefix: string): Promise<OwnerDto[]> {
-    const response = await this.client.get<OwnerDto[]>('/owners', {
-      params: { lastName: prefix }
-    });
-    return response.data;
+  /**
+   * Fetches every owner by paging through the contract (size<=100), rather than
+   * relying on an uncapped size — the server caps size at 100, so "fetch all"
+   * must page.
+   */
+  async fetchAllOwners(): Promise<OwnerDto[]> {
+    const size = 100;
+    const all: OwnerDto[] = [];
+    let page = 0;
+    let totalPages = 1;
+    do {
+      const res = await this.client.get<OwnerPage>('/owners', { params: { size, page } });
+      all.push(...res.data.content);
+      totalPages = res.data.totalPages;
+      page += 1;
+    } while (page < totalPages);
+    return all;
   }
 
   async fetchVisits(): Promise<VisitDto[]> {
@@ -52,10 +81,13 @@ export class ApiClient {
     return response.data;
   }
 
-  static getFullNames(owners: OwnerDto[]): string[] {
-    return owners
-      .map(owner => `${owner.firstName} ${owner.lastName}`.trim())
-      .filter(name => name.length > 0);
+  /** Phonebook rendering used by the Owners table: "Lastname, Firstname". */
+  static phonebookName(owner: OwnerDto): string {
+    return `${owner.lastName}, ${owner.firstName}`.trim();
+  }
+
+  static getPhonebookNames(owners: OwnerDto[]): string[] {
+    return owners.map((o) => ApiClient.phonebookName(o)).filter((name) => name.length > 0);
   }
 
   static sorted(values: string[]): string[] {
@@ -66,31 +98,13 @@ export class ApiClient {
     return [...rows].sort((a, b) => a.date.localeCompare(b.date));
   }
 
-  static extractLastName(fullName: string): string {
-    const firstSpace = fullName.indexOf(' ');
-    if (firstSpace < 0 || firstSpace === fullName.length - 1) {
-      return fullName;
-    }
-    return fullName.substring(firstSpace + 1);
-  }
-
-  static choosePrefixFrom(owners: OwnerDto[]): string {
-    for (const owner of owners) {
-      if (owner.lastName && owner.lastName.trim()) {
-        const lastName = owner.lastName.trim();
-        return lastName.substring(0, Math.min(2, lastName.length));
-      }
-    }
-    throw new Error('No owners available to derive search prefix');
-  }
-
   /**
    * The visible textual content of an owner's table row, joined and lowercased.
-   * Mirrors the frontend OwnerListComponent so the e2e expectations match the UI
-   * exactly (Name, Address, City, Telephone, and each pet's name).
+   * Mirrors the server-side ?q= search (firstName, lastName, address, city,
+   * telephone, and each pet's name) so e2e expectations match the contract.
    */
   static visibleText(owner: OwnerDto): string {
-    const petNames = (owner.pets ?? []).map(pet => pet.name ?? '');
+    const petNames = (owner.pets ?? []).map((pet) => pet.name ?? '');
     return [
       owner.firstName,
       owner.lastName,
@@ -98,11 +112,13 @@ export class ApiClient {
       owner.city,
       owner.telephone,
       ...petNames,
-    ].join(' ').toLowerCase();
+    ]
+      .join(' ')
+      .toLowerCase();
   }
 
   /**
-   * Filters owners the same way the frontend does: split the term on whitespace
+   * Filters owners the way the server's ?q= does: split the term on whitespace
    * and keep owners whose visible text contains every token (case-insensitive).
    */
   static filterByTerm(owners: OwnerDto[], term: string): OwnerDto[] {
@@ -110,9 +126,9 @@ export class ApiClient {
     if (tokens.length === 0) {
       return owners;
     }
-    return owners.filter(owner => {
+    return owners.filter((owner) => {
       const text = ApiClient.visibleText(owner);
-      return tokens.every(token => text.includes(token));
+      return tokens.every((token) => text.includes(token));
     });
   }
 

@@ -8,6 +8,7 @@ import { HttpResponse } from '@angular/common/http';
 import { HttpErrorHandler } from '../error.service';
 import { OwnerService } from './owner.service';
 import { Owner } from './owner';
+import { OwnerPage } from './owner-page';
 
 describe('OwnerService', () => {
   let httpTestingController: HttpTestingController;
@@ -48,14 +49,21 @@ describe('OwnerService', () => {
     httpTestingController.verify();
   });
 
-  it('should return expected owners (called once)', () => {
+  it('should return a page of owners (default query, called once)', () => {
+    const page: OwnerPage = {
+      content: expectedOwners,
+      totalElements: 2,
+      totalPages: 1,
+      number: 0,
+      size: 10,
+    };
     ownerService
-      .getOwners()
-      .subscribe((owners) => expect(owners).toEqual(expectedOwners), fail);
+      .getOwnersPage()
+      .subscribe((p) => expect(p).toEqual(page), fail);
 
     const req = httpTestingController.expectOne(ownerService.entityUrl);
     expect(req.request.method).toEqual('GET');
-    req.flush(expectedOwners);
+    req.flush(page);
   });
 
   it('search the owner by id', () => {
@@ -131,15 +139,24 @@ describe('OwnerService', () => {
     req.flush(null);
   });
 
-  it('search owners by last name prefix', () => {
-    ownerService.searchOwners('Fr').subscribe((owners) => {
-      expect(owners).toEqual(expectedOwners);
-    });
+  it('passes q, page, size and sort as query params', () => {
+    const page: OwnerPage = {
+      content: expectedOwners,
+      totalElements: 2,
+      totalPages: 1,
+      number: 0,
+      size: 5,
+    };
+    ownerService
+      .getOwnersPage({ q: 'Fr', page: 0, size: 5, sort: 'name,asc' })
+      .subscribe((p) => expect(p).toEqual(page));
 
-    const req = httpTestingController.expectOne(
-      ownerService.entityUrl + '?lastName=Fr'
-    );
+    const req = httpTestingController.expectOne((r) => r.url === ownerService.entityUrl);
     expect(req.request.method).toEqual('GET');
-    req.flush(expectedOwners);
+    expect(req.request.params.get('q')).toEqual('Fr');
+    expect(req.request.params.get('page')).toEqual('0');
+    expect(req.request.params.get('size')).toEqual('5');
+    expect(req.request.params.get('sort')).toEqual('name,asc');
+    req.flush(page);
   });
 });

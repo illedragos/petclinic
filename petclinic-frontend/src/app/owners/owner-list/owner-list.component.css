@@ -3,6 +3,36 @@
 display:none;
 }
 
+/* Loading UX: keep the prior rows visible but dimmed, with a spinner overlay. */
+.owners-table-wrap {
+	position: relative;
+}
+
+.owners-table-wrap.loading .table {
+	opacity: 0.5;
+	pointer-events: none;
+	transition: opacity 120ms ease-in-out;
+}
+
+.owners-spinner-overlay {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	display: flex;
+	align-items: flex-start;
+	justify-content: center;
+	padding-top: 80px;
+	pointer-events: none;
+}
+
+.owners-initial-loading {
+	display: flex;
+	justify-content: center;
+	padding: 48px 0;
+}
+
 #nameGroup {
 	display: flex;
 	align-items: center;

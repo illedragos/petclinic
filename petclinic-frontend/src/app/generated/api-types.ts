@@ -134,6 +134,34 @@ export interface components {
        */
       telephone: string;
     };
+    OwnerPageDto: {
+      /** @description The owners on this page. */
+      content: components["schemas"]["OwnerDto"][];
+      /**
+       * Format: int32
+       * @description The 0-based index of this page.
+       * @example 0
+       */
+      number: number;
+      /**
+       * Format: int32
+       * @description The page size used for this page.
+       * @example 10
+       */
+      size: number;
+      /**
+       * Format: int64
+       * @description Total number of owners matching the filter.
+       * @example 42
+       */
+      totalElements: number;
+      /**
+       * Format: int32
+       * @description Total number of pages for the current page size.
+       * @example 5
+       */
+      totalPages: number;
+    };
     OwnerFieldsDto: {
       /**
        * @description The postal address of the pet owner.
@@ -543,14 +571,21 @@ export interface operations {
   listOwners: {
     parameters: {
       query?: {
-        lastName?: string;
+        /** @description Full-text search across firstName, lastName, address, city, telephone, and pet names. */
+        q?: string;
+        /** @description Zero-based page index. */
+        page?: number;
+        /** @description Page size. */
+        size?: number;
+        /** @description Sort as "<column>,<dir>". Columns: name, address, city, telephone. Direction: asc, desc. */
+        sort?: string;
       };
     };
     responses: {
       /** @description OK */
       200: {
         content: {
-          "application/json": components["schemas"]["OwnerDto"][];
+          "application/json": components["schemas"]["OwnerPageDto"];
         };
       };
       /** @description Bad Request */

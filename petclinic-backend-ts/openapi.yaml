@@ -70,6 +70,36 @@ components:
         - city
         - telephone
       type: object
+    OwnerPageDto:
+      properties:
+        content:
+          description: The owners on this page.
+          items:
+            $ref: '#/components/schemas/OwnerDto'
+          type: array
+        number:
+          description: The 0-based index of this page.
+          example: 0
+          type: number
+        size:
+          description: The page size used for this page.
+          example: 10
+          type: number
+        totalElements:
+          description: Total number of owners matching the filter.
+          example: 42
+          type: number
+        totalPages:
+          description: Total number of pages for the current page size.
+          example: 5
+          type: number
+      required:
+        - content
+        - totalElements
+        - totalPages
+        - number
+        - size
+      type: object
     PetDto:
       properties:
         birthDate:
@@ -281,17 +311,45 @@ paths:
   /api/owners:
     get:
       operationId: listOwners
-      parameters: []
+      parameters:
+        - description: Full-text search across firstName, lastName, address, city, telephone, and pet names.
+          in: query
+          name: q
+          required: false
+          schema:
+            type: string
+        - description: Zero-based page index.
+          in: query
+          name: page
+          required: false
+          schema:
+            default: 0
+            minimum: 0
+            type: number
+        - description: Page size.
+          in: query
+          name: size
+          required: false
+          schema:
+            default: 10
+            maximum: 100
+            minimum: 1
+            type: number
+        - description: 'Sort as "<column>,<dir>". Columns: name, address, city, telephone. Direction: asc, desc.'
+          in: query
+          name: sort
+          required: false
+          schema:
+            example: name,asc
+            type: string
       responses:
         '200':
           content:
             application/json:
               schema:
-                items:
-                  $ref: '#/components/schemas/OwnerDto'
-                type: array
+                $ref: '#/components/schemas/OwnerPageDto'
           description: ''
-      summary: List owners
+      summary: List owners (paginated, sortable, searchable)
       tags:
         - owner
     post:

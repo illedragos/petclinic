@@ -15,7 +15,7 @@ import {
 import { ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Brackets, Repository } from 'typeorm';
 
 import { Owner } from './owner.entity';
 import { Pet } from '../pets/pet.entity';
@@ -23,7 +23,10 @@ import { Visit } from '../visits/visit.entity';
 import { PetType } from '../pet-types/pet-type.entity';
 
 import { OwnerDto } from './dto/owner.dto';
+import { OwnerPageDto } from './dto/owner-page.dto';
+import { ListOwnersQueryDto } from './dto/list-owners-query.dto';
 import { OwnerFieldsDto } from './dto/owner-fields.dto';
+import { buildOwnerSortChain } from './owner-sort';
 import { PetDto } from '../pets/dto/pet.dto';
 import { PetFieldsDto } from '../pets/dto/pet-fields.dto';
 import { VisitFieldsDto } from '../visits/dto/visit-fields.dto';
@@ -34,6 +37,11 @@ import { toVisitFromFields } from '../visits/visit.mapper';
 
 import { Roles } from '../common/security/roles.decorator';
 import { PermitAll } from '../common/security/permit-all.decorator';
+
+/** Escapes LIKE wildcards (`\`, `%`, `_`) in a user-supplied search token. */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
 
 /**
  * REST controller for owners.
@@ -56,15 +64,26 @@ export class OwnerController {
   ) {}
 
   /**
-   * GET /api/owners?lastName= — filters by a case-sensitive prefix on last name
-   * (`WHERE last_name LIKE :lastName%`); an empty lastName matches every owner.
+   * GET /api/owners — paginated, sortable, searchable owners list.
+   *
+   * Query params (validated by {@link ListOwnersQueryDto}): `q` (full-text
+   * search across all visible columns + pet names), `page` (0-based), `size`
+   * (1..100), `sort` (`<column>,<dir>`). Returns an {@link OwnerPageDto}.
    */
   @Get()
-  @ApiOperation({ operationId: 'listOwners', summary: 'List owners' })
-  @ApiOkResponse({ type: [OwnerDto] })
-  async listOwners(@Query('lastName') lastName = ''): Promise<OwnerDto[]> {
-    const owners = await this.findByLastNameStartingWith(lastName);
-    return toOwnerDtoCollection(owners);
+  @ApiOperation({ operationId: 'listOwners', summary: 'List owners (paginated, sortable, searchable)' })
+  @ApiOkResponse({ type: OwnerPageDto })
+  async listOwners(@Query() query: ListOwnersQueryDto): Promise<OwnerPageDto> {
+    const { q, page, size, sort } = query;
+    const [owners, totalElements] = await this.findPage(q, page, size, sort);
+
+    const dto = new OwnerPageDto();
+    dto.content = toOwnerDtoCollection(owners);
+    dto.totalElements = totalElements;
+    dto.totalPages = Math.ceil(totalElements / size);
+    dto.number = page;
+    dto.size = size;
+    return dto;
   }
 
   /** GET /api/owners/count — publicly reachable (@PermitAll). */
@@ -244,23 +263,57 @@ export class OwnerController {
   }
 
   /**
-   * Finds owners whose last name starts with the given prefix (case-sensitive
-   * LIKE). Implemented with a QueryBuilder, escaping LIKE wildcards in the
-   * user-supplied prefix.
+   * Runs the filtered + sorted + paginated owners query and returns
+   * `[ownersOnPage, totalMatchingOwners]`.
+   *
+   * A single QueryBuilder eager-loads pets (+ type/visits) for display, applies
+   * the per-token search WHERE, the server-built sort chain, and skip/take.
+   * Because the sort touches only owner-root columns and the pet match is an
+   * EXISTS subquery (non row-multiplying), TypeORM's distinct-root-id pagination
+   * holds: a page contains N owners (not N owner-pet rows) and the count counts
+   * owners.
    */
-  private async findByLastNameStartingWith(lastName: string): Promise<Owner[]> {
-    const escaped = lastName.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-    // Eager-load pets (+ each pet's type and visits) so the owner mapper can
-    // project them, so each owner in the list carries its full pets/visits.
-    // Order by owner id to keep the list stable (id-ascending).
-    return this.ownerRepository
+  private async findPage(
+    q: string,
+    page: number,
+    size: number,
+    sort: string | undefined,
+  ): Promise<[Owner[], number]> {
+    const qb = this.ownerRepository
       .createQueryBuilder('owner')
       .leftJoinAndSelect('owner.pets', 'pet')
       .leftJoinAndSelect('pet.type', 'type')
-      .leftJoinAndSelect('pet.visits', 'visit')
-      .where("owner.lastName LIKE :prefix ESCAPE '\\'", { prefix: `${escaped}%` })
-      .orderBy('owner.id', 'ASC')
-      .getMany();
+      .leftJoinAndSelect('pet.visits', 'visit');
+
+    // Full-text search parity with #24: every whitespace-separated token must
+    // match (case-insensitive "contains") some visible column or a pet name.
+    const tokens = (q ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+    tokens.forEach((token, i) => {
+      const param = `t${i}`;
+      const like = `%${escapeLike(token)}%`;
+      qb.andWhere(
+        new Brackets((w) => {
+          w.where(`LOWER(owner.firstName) LIKE :${param} ESCAPE '\\'`, { [param]: like })
+            .orWhere(`LOWER(owner.lastName) LIKE :${param} ESCAPE '\\'`, { [param]: like })
+            .orWhere(`LOWER(owner.address) LIKE :${param} ESCAPE '\\'`, { [param]: like })
+            .orWhere(`LOWER(owner.city) LIKE :${param} ESCAPE '\\'`, { [param]: like })
+            .orWhere(`LOWER(owner.telephone) LIKE :${param} ESCAPE '\\'`, { [param]: like })
+            .orWhere(
+              `EXISTS (SELECT 1 FROM pets p WHERE p.owner_id = owner.id ` +
+                `AND LOWER(p.name) LIKE :${param} ESCAPE '\\')`,
+              { [param]: like },
+            );
+        }),
+      );
+    });
+
+    for (const { field, direction } of buildOwnerSortChain(sort)) {
+      qb.addOrderBy(`owner.${field}`, direction);
+    }
+
+    qb.skip(page * size).take(size);
+
+    return qb.getManyAndCount();
   }
 
   /**

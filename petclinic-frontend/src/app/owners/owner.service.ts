@@ -1,10 +1,19 @@
 import { Injectable } from '@angular/core';
 import { Owner } from './owner';
+import { OwnerPage } from './owner-page';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { catchError } from 'rxjs/operators';
 import { HandleError, HttpErrorHandler } from '../error.service';
+
+/** Query parameters for the paginated owners list. */
+export interface OwnerQuery {
+  q?: string;
+  page?: number;
+  size?: number;
+  sort?: string; // "<column>,<dir>", e.g. "name,asc"
+}
 
 @Injectable()
 export class OwnerService {
@@ -19,10 +28,27 @@ export class OwnerService {
     this.handlerError = httpErrorHandler.createHandleError('OwnerService');
   }
 
-  getOwners(): Observable<Owner[]> {
+  /**
+   * Fetches a single page of owners from the server. Search (`q`), pagination
+   * (`page`/`size`) and sorting (`sort`) are all applied server-side.
+   */
+  getOwnersPage(query: OwnerQuery = {}): Observable<OwnerPage> {
+    let params = new HttpParams();
+    if (query.q) {
+      params = params.set('q', query.q);
+    }
+    if (query.page != null) {
+      params = params.set('page', query.page);
+    }
+    if (query.size != null) {
+      params = params.set('size', query.size);
+    }
+    if (query.sort) {
+      params = params.set('sort', query.sort);
+    }
     return this.http
-      .get<Owner[]>(this.entityUrl)
-      .pipe(catchError(this.handlerError('getOwners', [])));
+      .get<OwnerPage>(this.entityUrl, { params })
+      .pipe(catchError(this.handlerError('getOwnersPage', emptyPage(query))));
   }
 
   getOwnerById(ownerId: number): Observable<Owner> {
@@ -37,7 +63,6 @@ export class OwnerService {
       .pipe(catchError(this.handlerError('addOwner', owner)));
   }
 
-
   updateOwner(ownerId: string, owner: Owner): Observable<{}> {
     return this.http
       .put<Owner>(this.entityUrl + '/' + ownerId, owner)
@@ -49,14 +74,15 @@ export class OwnerService {
       .delete<Owner>(this.entityUrl + '/' + ownerId)
       .pipe(catchError(this.handlerError('deleteOwner', [ownerId])));
   }
+}
 
-  searchOwners(lastName: string): Observable<Owner[]> {
-    let url = this.entityUrl;
-    if (lastName !== undefined) {
-      url += '?lastName=' + lastName;
-    }
-    return this.http
-      .get<Owner[]>(url)
-      .pipe(catchError(this.handlerError('searchOwners', [])));
-  }
+/** An empty page used as the safe fallback when a list fetch fails. */
+function emptyPage(query: OwnerQuery): OwnerPage {
+  return {
+    content: [],
+    totalElements: 0,
+    totalPages: 0,
+    number: query.page ?? 0,
+    size: query.size ?? 10,
+  };
 }
